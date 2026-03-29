@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**GitHub**: https://github.com/mix060514/acer-predator-led-linux
+
 ## 專案目標
 
 在 Linux 上控制 **Acer Predator Helios 500 PH517-52** 的非鍵盤燈光（Logo、機身燈條），目標是能在開機時自動關閉這些燈。
