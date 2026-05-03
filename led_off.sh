@@ -1,86 +1,137 @@
 #!/bin/bash
-# Acer WMI LED 暴力測試腳本 v2 - 擴展測試範圍
-# GUID index: 0=GUID4(已知), 1=BE, 2=BF, 3=BG, 4=BK, 5=BL
+# Acer Predator PH517-52 LED off entrypoint.
+#
+# This script intentionally exposes only the production off path:
+#   - non-keyboard decorative LEDs: fixed whitelist inside acer_wmi_tester.ko
+#   - keyboard backlight: existing facer device brightness set to 0, if present
+
+set -euo pipefail
 
 PROC=/proc/acer_wmi_tester
-RESULTS=""
+KBBL_DEV=/dev/acer-gkbbl-0
+KBBL_STATIC_DEV=/dev/acer-gkbbl-static-0
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+KO="${KO:-$SCRIPT_DIR/acer_wmi_tester.ko}"
+REQUIRED_INTERFACE_VERSION=led-off-v6-confirmed
 
-if [ ! -w "$PROC" ]; then
-    echo "ERROR: $PROC 不可寫，請 sudo insmod acer_wmi_tester.ko"
+info() {
+    echo "INFO: $*" >&2
+}
+
+run_timeout() {
+    local seconds=$1
+    shift
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --foreground "${seconds}s" "$@"
+    else
+        "$@"
+    fi
+}
+
+module_is_restricted() {
+    [ -r "$PROC" ] &&
+        grep -q '^interface : restricted LED off$' "$PROC" &&
+        grep -q "^version   : ${REQUIRED_INTERFACE_VERSION}$" "$PROC"
+}
+
+module_loaded() {
+    grep -q '^acer_wmi_tester ' /proc/modules
+}
+
+wait_module_unloaded() {
+    local _
+
+    for _ in $(seq 1 20); do
+        module_loaded || return 0
+        sleep 0.1
+    done
+
+    return 1
+}
+
+print_status() {
+    if [ "${VERBOSE:-0}" = "1" ]; then
+        info "輸出完整 WMI 狀態。"
+        cat "$PROC"
+    else
+        info "輸出 WMI 摘要。完整 call log 可用：VERBOSE=1 sudo bash led_off.sh"
+        awk '/^(interface|version|guid|allowed|call_count|last_run)[[:space:]:]/ { print }' "$PROC"
+    fi
+}
+
+if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+    echo "ERROR: 請使用 sudo 執行：sudo bash led_off.sh" >&2
     exit 1
 fi
 
-call() {
-    local g=$1 m=$2 i=$3 desc=$4
-    echo "$g $m $i" > "$PROC"
-    local out=$(grep "output\|status\|out_type\|out_len" "$PROC" | tr '\n' ' ')
-    printf "G%d m%-3d i=%-12s  %s\n" "$g" "$m" "$i" "$out"
-}
+if [ -e "$PROC" ] && ! module_is_restricted; then
+    info "偵測到舊版 acer_wmi_tester，準備卸載後載入新版。"
 
-echo "================================================================="
-echo "=== STEP 1: GUID4 GET 方法 1-15（找 GetGamingLEDBehavior）==="
-echo "================================================================="
-for m in $(seq 1 15); do
-    for idx in 0 1 3 5; do
-        call 0 $m $idx "GET"
-    done
-    echo "--- method $m end ---"
-done
+    if [ ! -f "$KO" ]; then
+        echo "ERROR: 已載入舊版 acer_wmi_tester，但找不到新版 kernel module：$KO" >&2
+        echo "請先在專案目錄執行 make，或用 KO=/path/to/acer_wmi_tester.ko 指定位置。" >&2
+        exit 1
+    fi
 
-echo
-echo "================================================================="
-echo "=== STEP 2: GUID4 SET 方法 7-15（試不同 ON 值）==="
-echo "  注意：請觀察燈光！"
-echo "================================================================="
-# 試多種可能的 ON 格式
-for m in 7 8 9 10 11 12 13 15; do
-    # Format C: (1<<16)|index
-    for idx in 1 3 5; do
-        on_val=$(printf "0x%x" $(( (1 << 16) | idx )))
-        call 0 $m $on_val "SET idx=$idx ON_C"
-    done
-    # Format D: (index<<16)|256
-    for idx in 1 3 5; do
-        on_val=$(printf "0x%x" $(( (idx << 16) | 256 )))
-        call 0 $m $on_val "SET idx=$idx ON_D"
-    done
-    # Format E: (index<<8)|1
-    for idx in 1 3 5; do
-        on_val=$(printf "0x%x" $(( (idx << 8) | 1 )))
-        call 0 $m $on_val "SET idx=$idx ON_E"
-    done
-    echo "--- method $m end ---"
-    sleep 0.3
-done
+    if module_loaded; then
+        run_timeout 5 rmmod acer_wmi_tester
+        if ! wait_module_unloaded; then
+            echo "ERROR: 舊版 acer_wmi_tester 仍在載入中，無法安全載入新版。" >&2
+            exit 1
+        fi
+    fi
+fi
 
-echo
-echo "================================================================="
-echo "=== STEP 3: 其他 GUID（BE=1, BF=2, BG=3）的方法 1-8 ==="
-echo "  注意：請觀察燈光！"
-echo "================================================================="
-for g in 1 2 3; do
-    echo "--- GUID[$g] ---"
-    for m in $(seq 1 8); do
-        for idx in 0 1 3 5; do
-            call $g $m $idx "GET"
-        done
-    done
-done
+if ! module_is_restricted; then
+    info "確認受限關燈 kernel module。"
 
-echo
-echo "================================================================="
-echo "=== STEP 4: 其他 GUID SET 測試（Format C ON）==="
-echo "  注意：請觀察燈光！"
-echo "================================================================="
-for g in 1 2 3 4 5; do
-    echo "--- GUID[$g] SET ON ---"
-    for m in 1 2 3 4 5 6; do
-        for idx in 1 3 5; do
-            on_val=$(printf "0x%x" $(( (1 << 16) | idx )))
-            call $g $m $on_val "SET"
-        done
-    done
-done
+    if [ ! -f "$KO" ]; then
+        echo "ERROR: 找不到 kernel module：$KO" >&2
+        echo "請先在專案目錄執行 make，或用 KO=/path/to/acer_wmi_tester.ko 指定位置。" >&2
+        exit 1
+    fi
 
-echo
-echo "=== 測試結束 ==="
+    if ! module_loaded; then
+        run_timeout 5 insmod "$KO"
+    fi
+
+    for _ in $(seq 1 10); do
+        module_is_restricted && break
+        sleep 0.2
+    done
+fi
+
+if ! module_is_restricted || [ ! -w "$PROC" ]; then
+    echo "ERROR: $PROC 不是可寫的受限關燈介面。" >&2
+    exit 1
+fi
+
+info "回放舊版有效腳本的 WMID_GUID4 固定序列（排除 fan/misc/其他 GUID）。"
+if ! run_timeout 60 bash -c 'printf "off\n" > "$1"' _ "$PROC"; then
+    echo "ERROR: 寫入 $PROC 超時或失敗；已停止，沒有進行其他 WMI 測試。" >&2
+    exit 1
+fi
+
+if [ -w "$KBBL_DEV" ]; then
+    info "透過 facer 鍵盤背光介面設定 brightness=0。"
+
+    if [ -w "$KBBL_STATIC_DEV" ]; then
+        if ! run_timeout 3 bash -c '
+            printf "\001\000\000\000" > "$1"
+            printf "\002\000\000\000" > "$1"
+            printf "\004\000\000\000" > "$1"
+            printf "\010\000\000\000" > "$1"
+        ' _ "$KBBL_STATIC_DEV"; then
+            echo "WARN: 無法透過 $KBBL_STATIC_DEV 設定鍵盤全區黑色。" >&2
+        fi
+    fi
+
+    if ! run_timeout 3 bash -c 'printf "\000\000\000\000\000\000\000\000\000\001\000\000\000\000\000\000" > "$1"' _ "$KBBL_DEV"; then
+        echo "WARN: 無法透過 $KBBL_DEV 關閉鍵盤背光。" >&2
+    fi
+else
+    echo "INFO: 未找到可寫的 $KBBL_DEV，略過鍵盤背光。" >&2
+fi
+
+print_status
