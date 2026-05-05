@@ -1,0 +1,12 @@
+[Unit]
+Description=Acer Predator LED off
+After=systemd-modules-load.service
+ConditionPathExists=/home/mix060514/pj/cc/led_off.sh
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/mix060514/pj/cc/led_off_boot.sh
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target
